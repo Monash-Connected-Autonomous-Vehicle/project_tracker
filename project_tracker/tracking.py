@@ -1,14 +1,16 @@
 import logging
 from collections import deque
 import copy
+import time
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from transforms3d.euler import euler2quat
 
 from mcav_interfaces.msg import DetectedObjectArray
 
 class TrackedObject():
 
-    def __init__(self, detected_object, object_id):
+    def __init__(self, detected_object, object_id, max_frames_length=10):
         """
         Defintion for frame to track object through time
 
@@ -25,6 +27,35 @@ class TrackedObject():
         self.centre = (detected_object.pose.position.x, detected_object.pose.position.y, detected_object.pose.position.z)
         self.skipped_frames = 0 # number of frames it has been skipped because undetected
 
+        self.previous_centres = deque(maxlen=max_frames_length)
+        self.time_stamps = deque(maxlen=max_frames_length)
+    
+    def update_velocity(self, new_position):
+        """
+        Update velocity and return yaw as a product of velocity vector produced.
+
+        Parameters
+        ----------
+        new_position : geometry_msgs:position
+            where new_position.x is the x coordinate position and so on for y and z
+        Returns
+        -------
+        velocity, yaw : np.array(3), float
+        """
+        new_centre = np.array([new_position.x, new_position.y, new_position.z])
+        # update list of previous centres and time stamps
+        self.time_stamps.append(time.time())
+        self.previous_centres.append(new_centre)
+        # use last two positions to the estimate the velocity
+        try:
+            # simple distance/time calculation
+            velocity = (self.previous_centres[-1] - self.previous_centres[-2])/(self.time_stamps[-1] - self.time_stamps[-2])
+        except IndexError:
+            return [0., 0., 0.], 0
+        # yaw = arctan(x/(-y))
+        yaw = np.arctan(velocity[0]/(-velocity[1])) - np.pi/2
+        logging.info(f"Velocity: {velocity}, yaw: {yaw}")
+        return velocity, yaw
 
 class Tracker():
 
@@ -156,7 +187,15 @@ class Tracker():
                     self.tracked_objects[i].skipped_frames = 0
                     # update the detected object reference e.g. update centre coordinates
                     new_detects.detected_objects[col_assignment[i]].object_id = self.tracked_objects[i].object_id
+                    vel, yaw = self.tracked_objects[i].update_velocity(
+                        new_detects.detected_objects[col_assignment[i]].pose.position
+                    )
                     self.tracked_objects[i].detected_object = new_detects.detected_objects[col_assignment[i]]
+                    quat = euler2quat(0., 0., yaw)
+                    self.tracked_objects[i].detected_object.pose.orientation.w = quat[0]
+                    self.tracked_objects[i].detected_object.pose.orientation.x = quat[1]
+                    self.tracked_objects[i].detected_object.pose.orientation.y = quat[2]
+                    self.tracked_objects[i].detected_object.pose.orientation.z = quat[3]
             else: # if not assigned, add a frame skipped
                 self.tracked_objects[i].skipped_frames += 1
         

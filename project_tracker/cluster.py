@@ -42,7 +42,7 @@ class PCL2Subscriber(Node):
         # parameters for Euclidean Clustering
         self.min_cluster_size = 10
         self.max_cluster_size = 600
-        self.cluster_tolerance = 0.4 # range from 0.5 -> 0.7 seems suitable. Test more when have more data
+        self.cluster_tolerance = 0.6 # range from 0.5 -> 0.7 seems suitable. Test more when have more data
 
         # create tracker for identifying and following objects over time
         # self.tracker = Tracker(max_frames_before_forget=2, max_frames_length=30, tracking_method="centre_distance", dist_threshold=5)
@@ -104,7 +104,7 @@ class PCL2Subscriber(Node):
 
         # track objects over time
         tracked_detected_objects = self.tracker.update(detected_objects)
-        print(f"Number of tracked objects: {len(tracked_detected_objects.detected_objects)}")
+        self.get_logger().info(f"Number of tracked objects: {len(tracked_detected_objects.detected_objects)}")
 
         # fit bounding boxes and ID labels
         self.fit_bounding_boxes(tracked_detected_objects)
@@ -157,8 +157,6 @@ class PCL2Subscriber(Node):
             # create feature extractor for bounding box
             feature_extractor = bb_cloud.make_MomentOfInertiaEstimation()
             feature_extractor.compute()
-            # axis-aligned bounding box
-            [min_point_AABB, max_point_AABB] = feature_extractor.get_AABB()
             # oriented bounding box
             [min_point_OBB, max_point_OBB, position_OBB,
                 rotational_matrix_OBB] = feature_extractor.get_OBB()
@@ -168,16 +166,20 @@ class PCL2Subscriber(Node):
             detected_object.object_id = cluster_idx # dummy value until we track the objects
             detected_object.frame_id = self.original_frame_id
 
-            # convert rotational matrix to quaternion for use in pose
-            roll, pitch, yaw = mat2euler(rotational_matrix_OBB)
-            while not(-10. < yaw*180/np.pi < 10.):
-                yaw -= np.sign(yaw) * 0.15
-            quat = euler2quat(0., 0., yaw)
-            # pose -> assume of center point
-            detected_object.pose.orientation.w = quat[0]
-            detected_object.pose.orientation.x = quat[1]
-            detected_object.pose.orientation.y = quat[2]
-            detected_object.pose.orientation.z = quat[3]
+
+            ### COMMENTED OUT AS WE ARE NOT ESTIMATING YAW HERE ANYMORE
+            ### WE ARE GOING TO ESTIMATE YAW BASED ON VELOCITY VECTORS
+
+            # # convert rotational matrix to quaternion for use in pose
+            # roll, pitch, yaw = mat2euler(rotational_matrix_OBB)
+            # while not(-10. < yaw*180/np.pi < 10.):
+            #     yaw -= np.sign(yaw) * 0.15
+            # quat = euler2quat(0., 0., yaw)
+            # # pose -> assume of center point
+            # detected_object.pose.orientation.w = quat[0]
+            # detected_object.pose.orientation.x = quat[1]
+            # detected_object.pose.orientation.y = quat[2]
+            # detected_object.pose.orientation.z = quat[3]
             # # orientation -> restricted to rotate only around the z axis i.e. flat to ground plane
             # mag = sqrt(quat[0]**2 + quat[3]**2)
             # detected_object.pose.orientation.w = float(quat[0]/mag)

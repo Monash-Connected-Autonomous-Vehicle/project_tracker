@@ -7,7 +7,9 @@
 
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
+#include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/filters/extract_indices.h>
 #include <sensor_msgs/msg/point_cloud2.h>
 #include <pcl_conversions/pcl_conversions.h>
 
@@ -69,20 +71,24 @@ private:
     passThroughFilter(pcxyz, pcxyz, "x", -7.0, 7.0, false);
     passThroughFilter(pcxyz, pcxyz, "y", -10.0, 10.0, false);
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr pcxyz_ground(new pcl::PointCloud<pcl::PointXYZ>);
+    /*
+    PREVIOUS GROUND FILTERING
+    */
 
-    // z-coordinate passthrough filter, extracting the points on the ground
-    passThroughFilter(pcxyz, pcxyz_ground, "z", -1.55, 1, true);
+    // pcl::PointCloud<pcl::PointXYZ>::Ptr pcxyz_ground(new pcl::PointCloud<pcl::PointXYZ>);
 
-    auto pointCloud2Ground = pxyzPclToPointCloud2(pcxyz_ground);
-    pointCloud2Ground.header.frame_id = "velodyne";
-    groundPublisher_->publish(pointCloud2Ground);
+    // // z-coordinate passthrough filter, extracting the points on the ground
+    // passThroughFilter(pcxyz, pcxyz_ground, "z", -1.55, 1, true);
+
+    // auto pointCloud2Ground = pxyzPclToPointCloud2(pcxyz_ground);
+    // pointCloud2Ground.header.frame_id = "velodyne";
+    // groundPublisher_->publish(pointCloud2Ground);
 
     // z-coordinate passthrough filter
-    passThroughFilter(pcxyz, pcxyz, "z", -1.55, 1, false);
+    // passThroughFilter(pcxyz, pcxyz, "z", -1.55, 1, false);
 
     pcl::PCLPointCloud2::Ptr pclPc2(new pcl::PCLPointCloud2());
-    pcl::PCLPointCloud2 pclPc2_ds;
+    pcl::PCLPointCloud2::Ptr pclPc2_ds(new pcl::PCLPointCloud2);
 
     // convert passthrough filtered pointcloud message to a PCLPointCloud2 message for downsampling
     pcl::toPCLPointCloud2(*pcxyz, *pclPc2);
@@ -91,13 +97,60 @@ private:
     pcl::VoxelGrid<pcl::PCLPointCloud2> sor;
     sor.setInputCloud(pclPc2);
     sor.setLeafSize(0.2f, 0.2f, 0.2f);
-    sor.filter(pclPc2_ds);
+    sor.filter(*pclPc2_ds);
+
+
+    // convert back to the templated PointCloud PointXYZ for segmentation
+    pcl::PointCloud<pcl::PointXYZ>::Ptr pclPc2_ds_xyz(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::fromPCLPointCloud2(*pclPc2_ds, *pclPc2_ds_xyz);
+
+    // planar segmentation to remove ground
+    pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients ());
+    pcl::PointIndices::Ptr inliers(new pcl::PointIndices ());
+    // Create the segmentation object
+    pcl::SACSegmentation<pcl::PointXYZ> seg;
+    seg.setOptimizeCoefficients(true);
+    seg.setModelType(pcl::SACMODEL_PLANE);
+    seg.setMethodType(pcl::SAC_RANSAC);
+    seg.setMaxIterations(1000);
+    seg.setDistanceThreshold(0.2);
+
+    seg.setInputCloud(pclPc2_ds_xyz);
+    seg.segment(*inliers, *coefficients);
+
+    // Create the filtering object
+    pcl::ExtractIndices<pcl::PointXYZ> extract;
+    // create the ground and filter pointcloud objects
+    pcl::PointCloud<pcl::PointXYZ>::Ptr pcxyz_ground(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr pcxyz_non_ground(new pcl::PointCloud<pcl::PointXYZ>);
+    // extract the inliers
+    extract.setInputCloud(pclPc2_ds_xyz);
+    extract.setIndices(inliers);
+    extract.setNegative(false);
+    extract.filter(*pcxyz_ground);
+    // extract the remaining cloud apart from the inliers
+    extract.setNegative(true);
+    extract.filter(*pcxyz_non_ground);
+    pclPc2_ds_xyz.swap(pcxyz_non_ground);
+
+    // convert back to PCLPointCloud2 message
+    pcl::PCLPointCloud2::Ptr pcl2_filtered(new pcl::PCLPointCloud2);
+    pcl::toPCLPointCloud2(*pclPc2_ds_xyz, *pcl2_filtered);
 
     sensor_msgs::msg::PointCloud2 filtered_pc2;
-    pcl_conversions::moveFromPCL(pclPc2_ds, filtered_pc2);
+    pcl_conversions::moveFromPCL(*pcl2_filtered, filtered_pc2);
 
-    // publising filtered pointcloud2 msg
+    // publishing filtered pointcloud2 msg
     publish_filtered_pcl2(filtered_pc2);
+
+    // publish ground PointCloud
+    pcl::PCLPointCloud2::Ptr pcl2_ground(new pcl::PCLPointCloud2);
+    pcl::toPCLPointCloud2(*pcxyz_ground, *pcl2_ground);
+
+    sensor_msgs::msg::PointCloud2 ground_pc2;
+    pcl_conversions::moveFromPCL(*pcl2_ground, ground_pc2);
+    
+    groundPublisher_->publish(ground_pc2);
   }
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr subscription_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher_;
