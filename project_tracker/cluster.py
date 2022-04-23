@@ -10,6 +10,7 @@ from math import sqrt
 import numpy as np
 
 from sensor_msgs.msg import PointCloud2 as PCL2
+from geometry_msgs.msg import Twist
 from visualization_msgs.msg import MarkerArray, Marker
 from transforms3d.quaternions import mat2quat
 from transforms3d.euler import mat2euler, euler2quat
@@ -30,6 +31,13 @@ class PCL2Subscriber(Node):
             PCL2,
             '/velodyne_filtered',
             self._callback,
+            10
+        )
+
+        self.self_twist_subscription = self.create_subscription(
+            Twist,
+            '/oxts_twist',
+            self._oxts_callback,
             10
         )
 
@@ -57,6 +65,11 @@ class PCL2Subscriber(Node):
 
         self.get_logger().set_level(logging.DEBUG)
 
+    def _oxts_callback(self, msg):
+        """Subscriber callback. Receives Twist message from mock publisher to use in velocity calculations."""
+        self.tracker.linear_vel = np.array([msg.linear.x, msg.linear.y, msg.linear.z])
+        self.tracker.angular_vel = np.array([msg.angular.x, msg.angular.y, msg.angular.z])
+        self.get_logger().debug(f"Twist message received! {msg}")
 
     def _callback(self, msg):
         """Subscriber callback. Receives PCL2 message and converts it to points"""
@@ -67,7 +80,7 @@ class PCL2Subscriber(Node):
         
         self.no_samples, self.no_axes = self.cloud.shape
         cloud_time = time.time() - start
-        self.get_logger().info(f"Took {cloud_time:.5f}s to receive pcl2 message: {self.no_samples, self.no_axes}")
+        self.get_logger().debug(f"Took {cloud_time:.5f}s to receive pcl2 message: {self.no_samples, self.no_axes}")
 
         ## python3-pcl binding euclidean clustering
         ec_cloud = pcl.PointCloud() # create empty pcl.PointCloud to use C++ bindings to PCL 
@@ -76,7 +89,7 @@ class PCL2Subscriber(Node):
         start = time.time()
         self.euclidean_clustering_ec(ec_cloud, ec_tree)
         clustering_ec_time = time.time() - start
-        self.get_logger().info(f"PCL binding ec took {clustering_ec_time:.5f}s to find {len(self.clusters_ec)} clusters.")
+        self.get_logger().debug(f"PCL binding ec took {clustering_ec_time:.5f}s to find {len(self.clusters_ec)} clusters.")
 
         ## PUBLISHING
         # COLOURED VERSION
@@ -104,13 +117,13 @@ class PCL2Subscriber(Node):
 
         # track objects over time
         tracked_detected_objects = self.tracker.update(detected_objects)
-        self.get_logger().info(f"Number of tracked objects: {len(tracked_detected_objects.detected_objects)}")
+        self.get_logger().debug(f"Number of tracked objects: {len(tracked_detected_objects.detected_objects)}")
 
         # fit bounding boxes and ID labels
         self.fit_bounding_boxes(tracked_detected_objects)
 
         tracking_time = time.time() - start
-        self.get_logger().info(f"Tracking took {tracking_time:.5f}s")
+        self.get_logger().debug(f"Tracking took {tracking_time:.5f}s")
 
         # publish bounding boxes and detected objects
         self._bounding_boxes_publisher.publish(self.markers)

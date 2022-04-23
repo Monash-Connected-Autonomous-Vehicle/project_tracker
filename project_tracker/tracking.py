@@ -30,7 +30,7 @@ class TrackedObject():
         self.previous_centres = deque(maxlen=max_frames_length)
         self.time_stamps = deque(maxlen=max_frames_length)
     
-    def update_velocity(self, new_position):
+    def update_velocity(self, new_position, vehicle_vel):
         """
         Update velocity and return yaw as a product of velocity vector produced.
 
@@ -38,6 +38,8 @@ class TrackedObject():
         ----------
         new_position : geometry_msgs:position
             where new_position.x is the x coordinate position and so on for y and z
+        vehicle_vel : list 
+            list of length 3 representing the velocity of the car in x, y and z directions
         Returns
         -------
         velocity, yaw : np.array(3), float
@@ -49,13 +51,14 @@ class TrackedObject():
         # use last two positions to the estimate the velocity
         try:
             # simple distance/time calculation
-            velocity = (self.previous_centres[-1] - self.previous_centres[-2])/(self.time_stamps[-1] - self.time_stamps[-2])
+            rel_velocity = (self.previous_centres[-1] - self.previous_centres[-2])/(self.time_stamps[-1] - self.time_stamps[-2])
+            abs_velocity = rel_velocity + vehicle_vel # vector arithmetic
         except IndexError:
             return [0., 0., 0.], 0
         # yaw = arctan(x/(-y))
-        yaw = np.arctan(velocity[0]/(-velocity[1])) - np.pi/2
-        logging.info(f"Velocity: {velocity}, yaw: {yaw}")
-        return velocity, yaw
+        yaw = np.arctan(abs_velocity[0]/(-abs_velocity[1])) - np.pi/2
+        logging.info(f"Relative velocity: {rel_velocity}, absolute velocity: {abs_velocity}, yaw: {yaw}")
+        return abs_velocity, yaw
 
 class Tracker():
 
@@ -100,6 +103,9 @@ class Tracker():
         self.tracked_id_count = 0
 
         self.updated_centres = []
+
+        self.linear_vel = np.array([0.,0.,0.])
+        self.angular_vel = np.array([0.,0.,0.])
 
         logging.basicConfig(level=logging.INFO)
 
@@ -188,7 +194,8 @@ class Tracker():
                     # update the detected object reference e.g. update centre coordinates
                     new_detects.detected_objects[col_assignment[i]].object_id = self.tracked_objects[i].object_id
                     vel, yaw = self.tracked_objects[i].update_velocity(
-                        new_detects.detected_objects[col_assignment[i]].pose.position
+                        new_detects.detected_objects[col_assignment[i]].pose.position,
+                        self.linear_vel
                     )
                     self.tracked_objects[i].detected_object = new_detects.detected_objects[col_assignment[i]]
                     quat = euler2quat(0., 0., yaw)
