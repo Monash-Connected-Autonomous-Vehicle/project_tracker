@@ -16,7 +16,7 @@ from sensor_msgs_py import point_cloud2
 
 from project_tracker.utils import numpy_2_PCL2
 
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import TwistStamped
 from builtin_interfaces.msg import Time
 
 class PointCloudToPCL2(Node):
@@ -24,7 +24,7 @@ class PointCloudToPCL2(Node):
     def __init__(self):
         super(PointCloudToPCL2, self).__init__('point_cloud_to_pcl2')
         self._publisher = self.create_publisher(PCL2, '/velodyne_points', 10)
-        self._oxts_publisher = self.create_publisher(Twist, '/oxts_twist', 10)
+        self._oxts_publisher = self.create_publisher(TwistStamped, '/oxts_twist', 10)
         
         # kitti data directory setup
         # velodyne_points and oxts should be directories within kitta_data_dir
@@ -80,14 +80,24 @@ class PointCloudToPCL2(Node):
 
     def publish_oxts(self):
         """Callback to publish oxts data as a Twist message for use in tracker"""
-        twist = Twist()
+        twist_stamped = TwistStamped()
+
+        twist_stamped.header = Header()
+        twist_stamped.header.frame_id = 'velodyne'
+        # create Time from timestamp provided in velodyne kitti data
+        stamp = Time()
+        epoch_time = self.start_epoch + self.oxts_timestamps[self.counter]
+        stamp.sec = int(epoch_time)
+        stamp.nanosec = int((epoch_time - stamp.sec)*10**9)
+        twist_stamped.header.stamp = stamp
+
         with open(self.oxts_file_paths[self.counter]) as f:
             oxts_data = [float(num) for num in f.read().split()]
-            twist.linear.x = oxts_data[8]
-            twist.linear.y = oxts_data[9]
-            twist.linear.z = oxts_data[10]
+            twist_stamped.twist.linear.x = oxts_data[8]
+            twist_stamped.twist.linear.y = oxts_data[9]
+            twist_stamped.twist.linear.z = oxts_data[10]
         
-        self._oxts_publisher.publish(twist)
+        self._oxts_publisher.publish(twist_stamped)
 
 
 

@@ -28,9 +28,9 @@ class TrackedObject():
         self.skipped_frames = 0 # number of frames it has been skipped because undetected
 
         self.previous_centres = deque(maxlen=max_frames_length)
-        self.time_stamps = deque(maxlen=max_frames_length)
+        self.timestamps = deque(maxlen=max_frames_length)
     
-    def update_velocity(self, new_position, vehicle_vel):
+    def update_velocity(self, new_position, velodyne_timestamp, twists_stamped):
         """
         Update velocity and return yaw as a product of velocity vector produced.
 
@@ -38,26 +38,50 @@ class TrackedObject():
         ----------
         new_position : geometry_msgs:position
             where new_position.x is the x coordinate position and so on for y and z
-        vehicle_vel : list 
-            list of length 3 representing the velocity of the car in x, y and z directions
+        velodyne_timestamp : Time (ROS builtin_interfaces.msg)
+            Velodyne timestamp to help with synchronisation between velodyne and oxts data
+        twists_stamped : collections.deque 
+            a list of TwistStamped messages representing IMU data over time.
         Returns
         -------
         velocity, yaw : np.array(3), float
         """
         new_centre = np.array([new_position.x, new_position.y, new_position.z])
         # update list of previous centres and time stamps
-        self.time_stamps.append(time.time())
         self.previous_centres.append(new_centre)
+        velodyne_timestamp = velodyne_timestamp.sec + velodyne_timestamp.nanosec / 10**9
+        self.timestamps.append(velodyne_timestamp) # master timestamp is velodyne
+
+        # determine which IMU reading matches velodyne data
+        oxts_timestamps = np.array([oxts.header.stamp.sec + oxts.header.stamp.nanosec / 10**9 for oxts in twists_stamped])
+        velo_oxts_diff = oxts_timestamps - velodyne_timestamp
+        logging.info(f"Difference in timestamps: {velo_oxts_diff}")
+        min_ind = np.argmin(np.abs(velo_oxts_diff))
+        logging.info(f"Velo ts: {velodyne_timestamp}, oxts ts: {oxts_timestamps[min_ind]}")
+        # create vehicle velocity based on minimum difference between timestamps
+        sign = int(np.sign(oxts_timestamps[min_ind]))
+        # Essentially: (vel[min_ind]) + time_diff * (gradient of vel[min_ind] - vel[min_ind - 1])
+        vehicle_vel = np.array([
+            twists_stamped[min_ind].twist.linear.x + velo_oxts_diff[min_ind]*(twists_stamped[min_ind].twist.linear.x - 
+            twists_stamped[min_ind - sign].twist.linear.x) / (velo_oxts_diff[min_ind] - velo_oxts_diff[min_ind - sign]), 
+            twists_stamped[min_ind].twist.linear.y + velo_oxts_diff[min_ind]*(twists_stamped[min_ind].twist.linear.y - 
+            twists_stamped[min_ind - sign].twist.linear.y) / (velo_oxts_diff[min_ind] - velo_oxts_diff[min_ind - sign]), 
+            twists_stamped[min_ind].twist.linear.z + velo_oxts_diff[min_ind]*(twists_stamped[min_ind].twist.linear.z - 
+            twists_stamped[min_ind - sign].twist.linear.z) / (velo_oxts_diff[min_ind] - velo_oxts_diff[min_ind - sign])
+        ])
+
         # use last two positions to the estimate the velocity
         try:
             # simple distance/time calculation
-            rel_velocity = (self.previous_centres[-1] - self.previous_centres[-2])/(self.time_stamps[-1] - self.time_stamps[-2])
+            logging.info(f"Diff in velodyne time: {(self.timestamps[-1] - self.timestamps[-2])}")
+            logging.info(f"Previous positions: {self.previous_centres[-1]}, before was at {self.previous_centres[-2]}")
+            rel_velocity = (self.previous_centres[-1] - self.previous_centres[-2])/(self.timestamps[-1] - self.timestamps[-2])
             abs_velocity = rel_velocity + vehicle_vel # vector arithmetic
-        except IndexError:
-            return [0., 0., 0.], 0
+        except IndexError: # only one frame captured
+            return np.array([0., 0., 0.]), 0.
         # yaw = arctan(x/(-y))
         yaw = np.arctan(abs_velocity[0]/(-abs_velocity[1])) - np.pi/2
-        logging.info(f"Relative velocity: {rel_velocity}, absolute velocity: {abs_velocity}, yaw: {yaw}")
+        logging.info(f"Relative velocity: {rel_velocity}\nvehicle velocity: {vehicle_vel}\nabsolute velocity: {abs_velocity}\nyaw: {yaw}")
         return abs_velocity, yaw
 
 class Tracker():
@@ -104,12 +128,12 @@ class Tracker():
 
         self.updated_centres = []
 
-        self.linear_vel = np.array([0.,0.,0.])
-        self.angular_vel = np.array([0.,0.,0.])
+        self.max_sync_length = 10
+        self.twists_stamped = deque(maxlen=self.max_sync_length)
 
         logging.basicConfig(level=logging.INFO)
 
-    def update(self, new_detects):
+    def update(self, new_detects, timestamp):
         """
         Callback to update the tracked DetectedObject's when receiving a new frame.
 
@@ -125,6 +149,8 @@ class Tracker():
         ----------
         new_frame : DetectedObjectArray
             Frame representing the most recent DetectedObjectArray 
+        timestamp : Time (ROS builtin_interfaces.msg)
+            Velodyne timestamp to help with synchronisation between velodyne and oxts data
         Returns
         -------
         DetectedObjectArray
@@ -194,8 +220,9 @@ class Tracker():
                     # update the detected object reference e.g. update centre coordinates
                     new_detects.detected_objects[col_assignment[i]].object_id = self.tracked_objects[i].object_id
                     vel, yaw = self.tracked_objects[i].update_velocity(
-                        new_detects.detected_objects[col_assignment[i]].pose.position,
-                        self.linear_vel
+                        new_position=new_detects.detected_objects[col_assignment[i]].pose.position,
+                        velodyne_timestamp=timestamp,
+                        twists_stamped=self.twists_stamped
                     )
                     self.tracked_objects[i].detected_object = new_detects.detected_objects[col_assignment[i]]
                     quat = euler2quat(0., 0., yaw)

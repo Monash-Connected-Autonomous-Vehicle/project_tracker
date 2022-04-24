@@ -10,7 +10,7 @@ from math import sqrt
 import numpy as np
 
 from sensor_msgs.msg import PointCloud2 as PCL2
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import TwistStamped
 from visualization_msgs.msg import MarkerArray, Marker
 from transforms3d.quaternions import mat2quat
 from transforms3d.euler import mat2euler, euler2quat
@@ -35,13 +35,12 @@ class PCL2Subscriber(Node):
         )
 
         self.self_twist_subscription = self.create_subscription(
-            Twist,
+            TwistStamped,
             '/oxts_twist',
             self._oxts_callback,
             10
         )
 
-        # TODO create cloud cluster publisher via creating a custom msg
         self._cloud_cluster_publisher = self.create_publisher(PCL2, 'clustered_pointclouds', 10)
         self._bounding_boxes_publisher = self.create_publisher(MarkerArray, 'bounding_boxes', 10)
         self._detected_objects_publisher = self.create_publisher(DetectedObjectArray, 'detected_objects', 10)
@@ -66,10 +65,12 @@ class PCL2Subscriber(Node):
         self.get_logger().set_level(logging.DEBUG)
 
     def _oxts_callback(self, msg):
-        """Subscriber callback. Receives Twist message from mock publisher to use in velocity calculations."""
-        self.tracker.linear_vel = np.array([msg.linear.x, msg.linear.y, msg.linear.z])
-        self.tracker.angular_vel = np.array([msg.angular.x, msg.angular.y, msg.angular.z])
-        self.get_logger().debug(f"Twist message received! {msg}")
+        """Subscriber callback. Receives TwistStamped message from mock publisher to use in velocity calculations."""
+        self.tracker.twists_stamped.append(msg)
+        # self.tracker.linear_vels.append(np.array([msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z]))
+        # self.tracker.angular_vel.append(np.array([msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z]))
+        # self.tracker.oxts_timestamps.append(msg.header.stamp)
+        self.get_logger().debug(f"TwistStamped message received! {msg}")
 
     def _callback(self, msg):
         """Subscriber callback. Receives PCL2 message and converts it to points"""
@@ -116,7 +117,7 @@ class PCL2Subscriber(Node):
         detected_objects = self.create_detected_objects() 
 
         # track objects over time
-        tracked_detected_objects = self.tracker.update(detected_objects)
+        tracked_detected_objects = self.tracker.update(detected_objects, timestamp=msg.header.stamp)
         self.get_logger().debug(f"Number of tracked objects: {len(tracked_detected_objects.detected_objects)}")
 
         # fit bounding boxes and ID labels
