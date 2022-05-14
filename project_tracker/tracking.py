@@ -55,11 +55,12 @@ class TrackedObject():
         # determine which IMU reading matches velodyne data
         oxts_timestamps = np.array([oxts.header.stamp.sec + oxts.header.stamp.nanosec / 10**9 for oxts in twists_stamped])
         velo_oxts_diff = oxts_timestamps - velodyne_timestamp
-        logging.info(f"Difference in timestamps: {velo_oxts_diff}")
+        logging.debug(f"Difference in timestamps: {velo_oxts_diff}")
         min_ind = np.argmin(np.abs(velo_oxts_diff))
-        logging.info(f"Velo ts: {velodyne_timestamp}, oxts ts: {oxts_timestamps[min_ind]}")
+        logging.debug(f"Velo ts: {velodyne_timestamp}, oxts ts: {oxts_timestamps[min_ind]}")
         # create vehicle velocity based on minimum difference between timestamps
         sign = int(np.sign(oxts_timestamps[min_ind]))
+
         # Essentially: (vel[min_ind]) + time_diff * (gradient of vel[min_ind] - vel[min_ind - 1])
         vehicle_vel = np.array([
             twists_stamped[min_ind].twist.linear.x + velo_oxts_diff[min_ind]*(twists_stamped[min_ind].twist.linear.x - 
@@ -73,16 +74,70 @@ class TrackedObject():
         # use last two positions to the estimate the velocity
         try:
             # simple distance/time calculation
-            logging.info(f"Diff in velodyne time: {(self.timestamps[-1] - self.timestamps[-2])}")
-            logging.info(f"Previous positions: {self.previous_centres[-1]}, before was at {self.previous_centres[-2]}")
+            logging.debug(f"Diff in velodyne time: {(self.timestamps[-1] - self.timestamps[-2])}")
+            logging.debug(f"Previous positions: {self.previous_centres[-1]}, before was at {self.previous_centres[-2]}")
             rel_velocity = (self.previous_centres[-1] - self.previous_centres[-2])/(self.timestamps[-1] - self.timestamps[-2])
             abs_velocity = rel_velocity + vehicle_vel # vector arithmetic
         except IndexError: # only one frame captured
             return np.array([0., 0., 0.]), 0.
-        # yaw = arctan(x/(-y))
-        yaw = np.arctan(abs_velocity[0]/(-abs_velocity[1])) - np.pi/2
-        logging.info(f"Relative velocity: {rel_velocity}\nvehicle velocity: {vehicle_vel}\nabsolute velocity: {abs_velocity}\nyaw: {yaw}")
-        return abs_velocity, yaw
+        # yaw = -1 * (pi/2 - arctan(x/y)). 
+        # Because right hand rule puts positive yaw defined as from positive x axis rotating towards negative y axis
+        raw_tri_angle = np.arctan(abs_velocity[0]/(abs_velocity[1]))
+        yaw = np.sign(raw_tri_angle) * (np.pi/2 - abs(raw_tri_angle))
+        logging.debug(f"Relative velocity: {rel_velocity}\nvehicle velocity: {vehicle_vel}\nabsolute velocity: {abs_velocity}")
+        
+        # filter the yaw
+        try:
+            filtered_yaw = self.yaw_filtering(self.previous_yaw, yaw)
+            # update previous yaw for next calculation
+            self.previous_yaw = filtered_yaw
+        except AttributeError:
+            self.previous_yaw = yaw
+        
+
+        # convert filtered yaw to quaternion to update orientation
+        quat = euler2quat(0., 0., self.previous_yaw)
+        self.detected_object.pose.orientation.w = quat[0]
+        self.detected_object.pose.orientation.x = quat[1]
+        self.detected_object.pose.orientation.y = quat[2]
+        self.detected_object.pose.orientation.z = quat[3]
+
+        
+        
+        return abs_velocity, self.previous_yaw
+
+    def yaw_filtering(self, prev_yaw, unfiltered_yaw):
+        """Filter the yaw based on the idea that it is unlikely according to physics that a car will
+        rotate beyond a certain absolute value from its previous yaw. 
+        Reference: https://arxiv.org/pdf/2109.09165.pdf section 3.4.2
+
+        :param prev_yaw: previous yaw in radians
+        :param unfiltered_yaw: unfiltered yaw in radians
+        """
+        delta_yaw = unfiltered_yaw - prev_yaw
+
+        # logging.info(f"Prev yaw: {prev_yaw*180/np.pi:.3f}, unfiltered_yaw: {unfiltered_yaw*180/np.pi:.3f}")
+        # logging.info(f"{self.object_id}: Delta yaw: {delta_yaw*180/np.pi:.3f}")
+        # if 50 <= abs(delta_yaw) * 180 / np.pi <= 130:
+        #     logging.info("Not updating\n")
+        #     return prev_yaw
+        # elif 20 < abs(delta_yaw) * 180 / np.pi < 50 or 130 < abs(delta_yaw) * 180 / np.pi < 160:
+        #     logging.info("Clipping to 30\n")
+        #     return prev_yaw + np.sign(delta_yaw) * 20/180*np.pi
+        # else:
+        #     logging.info("Updating\n")
+        #     return prev_yaw + delta_yaw
+
+        # normalise from [-pi, pi] -> [0, 1]
+        normalised_delta_yaw = (delta_yaw + np.pi)/(2*np.pi)
+        # normalising coefficient
+        # w = (np.cos(4*np.pi*normalised_delta_yaw)+ 1)/2
+        w = 1/np.exp(abs(delta_yaw)/(np.pi/2) * 2 * np.pi)
+        # convert to filtered yaw
+        filtered_yaw = prev_yaw + w * delta_yaw
+        logging.info(f"{self.object_id}: previous yaw {prev_yaw*180/np.pi:.3f}, unfiltered yaw {unfiltered_yaw*180/np.pi:.3f}, delta_yaw: {delta_yaw*180/np.pi:.2f},  norm_delta_yaw: {normalised_delta_yaw:.2f}, w: {w:.3f}, filtered yaw {filtered_yaw*180/np.pi:.3f}")
+        
+        return filtered_yaw
 
 class Tracker():
 
@@ -219,17 +274,14 @@ class Tracker():
                     self.tracked_objects[i].skipped_frames = 0
                     # update the detected object reference e.g. update centre coordinates
                     new_detects.detected_objects[col_assignment[i]].object_id = self.tracked_objects[i].object_id
+                    self.tracked_objects[i].detected_object = new_detects.detected_objects[col_assignment[i]]
+
+                    # update the velocity and yaw based off that velocity
                     vel, yaw = self.tracked_objects[i].update_velocity(
-                        new_position=new_detects.detected_objects[col_assignment[i]].pose.position,
+                        new_position=self.tracked_objects[i].detected_object.pose.position,
                         velodyne_timestamp=timestamp,
                         twists_stamped=self.twists_stamped
                     )
-                    self.tracked_objects[i].detected_object = new_detects.detected_objects[col_assignment[i]]
-                    quat = euler2quat(0., 0., yaw)
-                    self.tracked_objects[i].detected_object.pose.orientation.w = quat[0]
-                    self.tracked_objects[i].detected_object.pose.orientation.x = quat[1]
-                    self.tracked_objects[i].detected_object.pose.orientation.y = quat[2]
-                    self.tracked_objects[i].detected_object.pose.orientation.z = quat[3]
             else: # if not assigned, add a frame skipped
                 self.tracked_objects[i].skipped_frames += 1
         

@@ -48,7 +48,7 @@ class PCL2Subscriber(Node):
 
         # parameters for Euclidean Clustering
         self.min_cluster_size = 10
-        self.max_cluster_size = 600
+        self.max_cluster_size = 20000
         self.cluster_tolerance = 0.6 # range from 0.5 -> 0.7 seems suitable. Test more when have more data
 
         # create tracker for identifying and following objects over time
@@ -92,11 +92,14 @@ class PCL2Subscriber(Node):
         clustering_ec_time = time.time() - start
         self.get_logger().debug(f"PCL binding ec took {clustering_ec_time:.5f}s to find {len(self.clusters_ec)} clusters.")
 
+        merged_clusters = self.merge_y_clusters()
+        # merged_clusters = self.clusters_ec
+
         ## PUBLISHING
         # COLOURED VERSION
         # colouring the clouds
         self.colour_cluster_point_list = []
-        for j, indices in enumerate(self.clusters_ec):
+        for j, indices in enumerate(merged_clusters):
             for indice in indices:
                 self.colour_cluster_point_list.append([
                     self.cloud[indice][0],
@@ -152,6 +155,60 @@ class PCL2Subscriber(Node):
         self.clusters_ec = ec.Extract()
         return
 
+    def merge_y_clusters(self):
+        """Merge clusters if they have a large absolute y value (side to side). Large absolute y 
+        value indicates that the cluster is probably a wall. 
+        """
+        # iterate through all of the current clusters and note where large absolute y values occur
+        self.merged_clusters = []
+        to_merge_ys = []
+        to_merge_clusters = []
+        for indices in self.clusters_ec:
+            # extract centroids
+            cloud = self.cloud[list(indices)] # numpy array cloud
+            # convert to pcl object
+            bb_cloud = pcl.PointCloud()
+            bb_cloud.from_array(cloud) 
+            # create feature extractor for bounding box
+            feature_extractor = bb_cloud.make_MomentOfInertiaEstimation()
+            feature_extractor.compute()
+            # oriented bounding box
+            _, _, position_OBB, _ = feature_extractor.get_OBB()
+            y = float(position_OBB[0,1])
+
+            # append to list that will then be checked for merging
+            if abs(y) > 7.:
+                to_merge_ys.append(y)
+                to_merge_clusters.append(indices)
+            # otherwise append to already 'merged' clusters
+            else:
+                self.merged_clusters.append(indices)
+            
+        # check through each cluster to merge to find which have similar y values
+        while len(to_merge_ys) > 1:
+            # get distance between each cluster
+            y = to_merge_ys[0]
+            distances = [comp - y for comp in to_merge_ys[1:]]
+            # iterate through the distances and merge those with small distance
+            merged_cluster = []
+            leftover_indices = []
+            for i, dist in enumerate(distances):
+                if abs(dist) < 2.0:
+                    merged_cluster.extend(to_merge_clusters[i])
+                else:
+                    leftover_indices.append(i+1)
+            # append merged cluster and remove those that have already been merged
+            self.merged_clusters.append(merged_cluster)            
+            to_merge_ys = [to_merge_ys[i] for i in leftover_indices]
+            to_merge_clusters = [to_merge_clusters[i] for i in leftover_indices]
+        # put any leftover clusters into the merged clusters
+        for leftover_cluster in to_merge_clusters:
+            self.merged_clusters.append(leftover_cluster)
+        
+        self.get_logger().info(f"Merged {len(self.clusters_ec)-len(self.merged_clusters)} clusters.")
+        return self.merged_clusters
+
+
     def create_detected_objects(self):
         """
         Create detected objects from the clusters by finding their centre points and dimensions. This 
@@ -162,7 +219,7 @@ class PCL2Subscriber(Node):
         """
         objects = DetectedObjectArray()
 
-        for cluster_idx, indices in enumerate(self.clusters_ec):
+        for cluster_idx, indices in enumerate(self.merged_clusters):
             cloud = self.cloud[list(indices)] # numpy array cloud
             # convert to pcl object
             bb_cloud = pcl.PointCloud()
@@ -204,7 +261,7 @@ class PCL2Subscriber(Node):
             ### oriented version
             detected_object.pose.position.x = float(position_OBB[0,0])
             detected_object.pose.position.y = float(position_OBB[0,1])
-            detected_object.pose.position.z = float(position_OBB[0,2])
+            detected_object.pose.position.z = float(position_OBB[0,2]) 
             # dimensions -> assuming want distance from face to face
             detected_object.dimensions.x = 2 * float(max_point_OBB[0,0])
             detected_object.dimensions.y = 2 * float(max_point_OBB[0,1])
@@ -213,9 +270,52 @@ class PCL2Subscriber(Node):
             detected_object.object_class = detected_object.CLASS_UNKNOWN
             detected_object.signal_state = detected_object.SIGNAL_UNKNOWN
 
-            objects.detected_objects.append(detected_object)
+
+            # perform rule based filtering for types of objects we want to track
+            object_height = 2 * float(max_point_OBB[0,2])
+            object_width = 2 * float(max_point_OBB[0,1])
+            object_length = 2 * float(max_point_OBB[0,0])
+            
+            x = float(position_OBB[0,0])
+            y = float(position_OBB[0,1])
+            z = float(position_OBB[0,2]) 
+            real_object = self.check_real_object(object_height, object_width, object_length,
+            x, y, z)   
+
+            if real_object:
+                objects.detected_objects.append(detected_object)
+
 
         return objects
+
+    def check_real_object(self, height, width, length, x,y,z):
+        # parameters
+        min_height = 0.8
+        max_height = 3.5
+        min_width = 0.5
+        max_width = 3.
+        min_length = 0.5
+        max_length = 7.
+        min_ratio = 1.3
+        max_ratio = 5.
+        min_l_for_ratio = 3
+
+        top_area = width * length
+        ratio_l_w = length/width
+
+        if not(min_height <= height <= max_height):
+            self.get_logger().info(f"Discarding item, not in height boundaries: {height:.3f} ({x:.3f},{y:.3f},{z:.3f})")
+            return False
+        if not(min_width <= width <= max_width):
+            self.get_logger().info(f"Discarding item, not in width boundaries: {width:.3f} ({x:.3f},{y:.3f},{z:.3f})")
+            return False
+        if not(min_length <= length <= max_length):
+            self.get_logger().info(f"Discarding item, not in length boundaries: {length:.3f} ({x:.3f},{y:.3f},{z:.3f})")
+            return False
+        if length > min_l_for_ratio and not(min_ratio <= ratio_l_w <= max_ratio):
+            self.get_logger().info(f"Discarding item, not in ratio boundaries: {ratio_l_w:.3f} ({x:.3f},{y:.3f},{z:.3f})")
+            return False
+        return True
 
     def fit_bounding_boxes(self, tracked_detected_objects):
         """
@@ -279,7 +379,7 @@ class PCL2Subscriber(Node):
         except AttributeError: # if only 1 frame there are no bounding boxes to delete
             pass
 
-
+    
 
 def main(args=None):
     rclpy.init(args=args)

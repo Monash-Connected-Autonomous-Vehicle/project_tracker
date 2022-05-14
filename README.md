@@ -32,11 +32,11 @@ Project tracker takes inputs from the @Multi-Task Panoptic Perception model and 
     colcon build
     . install/setup.bash
     ```
-5. In a new terminal, navigate to the root of your workspace and call the publisher to publish mock data.
+5. In a new terminal, navigate to the root of your workspace and call the publisher to publish mock data. Set kitti_data_dir to where your kitti data is located.
 	```sh
     cd YOUR_WORKSPACE_ROOT
     . install/setup.bash
-    ros2 run project_tracker mock_pub velodyne_file_path:=/home/mcav/DATASETS/KITTI/2011_09_26/2011_09_26_drive_0048_sync/velodyne_points/data
+    ros2 run project_tracker mock_pub.py --ros-args -p kitti_data_dir:=/home/mcav/DATASETS/KITTI/2011_09_26/2011_09_26_drive_0048_sync
     ```
 6.  In a new terminal, navigate to the root of your workspace and call the `filter` node to reduce the number of LiDAR points.
 	```sh
@@ -47,7 +47,7 @@ Project tracker takes inputs from the @Multi-Task Panoptic Perception model and 
 7.  In a new terminal, call the clustering node to produce clusters, bounding boxes and `DetectedObjectArray`
     ```sh
     . install/setup.bash
-    ros2 run project_tracker cluster
+    ros2 run project_tracker cluster.py
     ```
 8.  In a new terminal, call the mock image publisher node to publish images to the /camera topic. this node takes two arguments from the command line. `Image_path` and `Frame_Id`
     ```sh

@@ -68,7 +68,7 @@ private:
     pcl::fromPCLPointCloud2(*pclPc2_t, *pcxyz);
 
     // x and y-coordinate passthrough filter
-    passThroughFilter(pcxyz, pcxyz, "x", -7.0, 7.0, false);
+    passThroughFilter(pcxyz, pcxyz, "x", -15.0, 15.0, false);
     passThroughFilter(pcxyz, pcxyz, "y", -10.0, 10.0, false);
 
     /*
