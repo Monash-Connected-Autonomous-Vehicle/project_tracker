@@ -11,8 +11,6 @@ from datetime import date
 
 from std_msgs.msg import Header
 from sensor_msgs.msg import PointCloud2 as PCL2
-from sensor_msgs.msg import PointField
-from sensor_msgs_py import point_cloud2
 
 from project_tracker.utils import numpy_2_PCL2
 
@@ -26,7 +24,7 @@ class PointCloudToPCL2(Node):
         self._publisher = self.create_publisher(PCL2, '/velodyne_points', 10)
         self._oxts_publisher = self.create_publisher(TwistStamped, '/oxts_twist', 10)
         
-        # kitti data directory setup
+        ## kitti data directory setup
         # velodyne_points and oxts should be directories within kitta_data_dir
         self.declare_parameter('kitti_data_dir', "/home/home/DATASETS/KITTI/2011_09_26/2011_09_26_drive_0048_sync/")
         kitti_data_dir = self.get_parameter('kitti_data_dir').get_parameter_value().string_value
@@ -45,7 +43,7 @@ class PointCloudToPCL2(Node):
             # pull only the seconds as we are only worried about relative time
             self.oxts_timestamps = [float(line.rstrip('\n').split()[1].split(':')[2]) for line in lines]
 
-        # loop publishing PCL2 and oxts Twist data
+        ## loop publishing PCL2 and oxts Twist data
         self.counter = 0
         self.start_epoch = time.time()
         while True:
@@ -59,12 +57,14 @@ class PointCloudToPCL2(Node):
             time.sleep(0.5) # don't overcook the CPU 
 
     def publish_pcl2(self):
-        """Callback to publish PCL2 data"""
+        """Converts binary velodyne data to sensor_msgs.msg.PointCloud2 and publishes to `/velodyne_points'
+        """
         msg = self.convert_bin_to_PCL2(self.velodyne_file_paths[self.counter], self.velodyne_timestamps[self.counter])
         self._publisher.publish(msg)            
 
     def convert_bin_to_PCL2(self, velodyne_file_path, timestamp):
-        """Method to convert Lidar data in binary format to PCL2 message"""
+        """Method to convert Lidar data in binary format to PCL2 message. First converts binary data to np.array
+        and then converts numpy array to sensors_msgs.msg.PointCloud2"""
         
         cloud = np.fromfile(velodyne_file_path, np.float32)
         cloud = cloud.reshape((-1, 4))
@@ -79,7 +79,8 @@ class PointCloudToPCL2(Node):
         return pcl2_msg
 
     def publish_oxts(self):
-        """Callback to publish oxts data as a Twist message for use in tracker"""
+        """Callback to publish oxts data as a geometry_msgs.msg.TwistStamped for use in tracker.
+        Publishes to `/oxts_twist`"""
         twist_stamped = TwistStamped()
 
         twist_stamped.header = Header()
@@ -91,6 +92,7 @@ class PointCloudToPCL2(Node):
         stamp.nanosec = int((epoch_time - stamp.sec)*10**9)
         twist_stamped.header.stamp = stamp
 
+        # open file and read in data
         with open(self.oxts_file_paths[self.counter]) as f:
             oxts_data = [float(num) for num in f.read().split()]
             twist_stamped.twist.linear.x = oxts_data[8]

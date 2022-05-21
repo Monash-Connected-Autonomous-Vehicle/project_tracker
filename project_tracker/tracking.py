@@ -11,15 +11,12 @@ from mcav_interfaces.msg import DetectedObjectArray
 class TrackedObject():
 
     def __init__(self, detected_object, object_id, max_frames_length=10):
-        """
-        Defintion for frame to track object through time
+        """Track object through time
 
-        Parameters
-        ----------
-        detected_object : DetectedObject
-            DetectedObject to track over time
-        object_id : int
-            Index to give to tracked object
+        Args:
+            detected_object (DetectedObject): DetectedObject to track over time
+            object_id (int): Index to give to tracked object
+            max_frames_length (int, optional): number of frames to remember the object before deleting. Defaults to 10.
         """
         self.detected_object = detected_object
         self.detected_object.object_id = object_id
@@ -27,24 +24,21 @@ class TrackedObject():
         self.centre = (detected_object.pose.position.x, detected_object.pose.position.y, detected_object.pose.position.z)
         self.skipped_frames = 0 # number of frames it has been skipped because undetected
 
+        # lists to track velocity of the object from IMU data
         self.previous_centres = deque(maxlen=max_frames_length)
         self.timestamps = deque(maxlen=max_frames_length)
     
     def update_velocity(self, new_position, velodyne_timestamp, twists_stamped):
-        """
-        Update velocity and return yaw as a product of velocity vector produced.
+        """Update velocity and return yaw as a product of velocity vector produced.
 
-        Parameters
-        ----------
-        new_position : geometry_msgs:position
-            where new_position.x is the x coordinate position and so on for y and z
-        velodyne_timestamp : Time (ROS builtin_interfaces.msg)
-            Velodyne timestamp to help with synchronisation between velodyne and oxts data
-        twists_stamped : collections.deque 
-            a list of TwistStamped messages representing IMU data over time.
-        Returns
-        -------
-        velocity, yaw : np.array(3), float
+        Args:
+            new_position (geometry_msgs.position): where new_position.x is the x coordinate position and so on for y and z
+            velodyne_timestamp (builtin_interfaces.msg.Time): velodyne timestamp to help with synchronisation between velodyne 
+                and oxts data
+            twists_stamped (collections.deque ): a list of TwistStamped messages representing IMU data over time.
+
+        Returns:
+            tuple(np.array(3), float): _description_
         """
         new_centre = np.array([new_position.x, new_position.y, new_position.z])
         # update list of previous centres and time stamps
@@ -101,37 +95,27 @@ class TrackedObject():
         self.detected_object.pose.orientation.x = quat[1]
         self.detected_object.pose.orientation.y = quat[2]
         self.detected_object.pose.orientation.z = quat[3]
-
-        
         
         return abs_velocity, self.previous_yaw
 
     def yaw_filtering(self, prev_yaw, unfiltered_yaw):
         """Filter the yaw based on the idea that it is unlikely according to physics that a car will
         rotate beyond a certain absolute value from its previous yaw. 
-        Reference: https://arxiv.org/pdf/2109.09165.pdf section 3.4.2
+        Reference: https://arxiv.org/pdf/2109.09165.pdf section 3.4.2. We have modified the equation 
+        used for filtering to be 1/exp(abs(delta_yaw)/(pi/2) * 2 * pi)
 
-        :param prev_yaw: previous yaw in radians
-        :param unfiltered_yaw: unfiltered yaw in radians
+        Args:
+            prev_yaw (float): previous yaw in radians
+            unfiltered_yaw (float): unfiltered yaw in radians
+
+        Returns:
+            float: filtered yaw
         """
         delta_yaw = unfiltered_yaw - prev_yaw
-
-        # logging.info(f"Prev yaw: {prev_yaw*180/np.pi:.3f}, unfiltered_yaw: {unfiltered_yaw*180/np.pi:.3f}")
-        # logging.info(f"{self.object_id}: Delta yaw: {delta_yaw*180/np.pi:.3f}")
-        # if 50 <= abs(delta_yaw) * 180 / np.pi <= 130:
-        #     logging.info("Not updating\n")
-        #     return prev_yaw
-        # elif 20 < abs(delta_yaw) * 180 / np.pi < 50 or 130 < abs(delta_yaw) * 180 / np.pi < 160:
-        #     logging.info("Clipping to 30\n")
-        #     return prev_yaw + np.sign(delta_yaw) * 20/180*np.pi
-        # else:
-        #     logging.info("Updating\n")
-        #     return prev_yaw + delta_yaw
 
         # normalise from [-pi, pi] -> [0, 1]
         normalised_delta_yaw = (delta_yaw + np.pi)/(2*np.pi)
         # normalising coefficient
-        # w = (np.cos(4*np.pi*normalised_delta_yaw)+ 1)/2
         w = 1/np.exp(abs(delta_yaw)/(np.pi/2) * 2 * np.pi)
         # convert to filtered yaw
         filtered_yaw = prev_yaw + w * delta_yaw
@@ -142,28 +126,27 @@ class TrackedObject():
 class Tracker():
 
     def __init__(self, max_frames_before_forget, max_frames_length, tracking_method="centre_distance", 
-                 dist_threshold=5, iou_threshold=0.8
+                 dist_threshold=5., iou_threshold=0.8
         ):
-        """
-        Class to track objects through frames using Hungarian Algorithm.
+        """Class to track objects through frames using Hungarian Algorithm.
 
-        Parameters
-        ----------
-        dist_threshold : float
-            Threshold before unassigning the tracking between frames.
-        max_frames_before_forget : int
-            Number of frames to iterate over without seeing DetectedObject before forgetting it
-        max_frames_length : int
-            Maximum memory back in time through frames
-        tracking_method : str
-            One of "centre_distance" or "iou". 
-            - "centre_distance" measures distances between centre points
-                of the detected objects. 
-            - "iou" looks at a birds eye view and measures IOU (intersection over union)
-                between the two rectangles. Note, it moves the bounding boxes to axis-
-                aligned by taking the top left point and the width and height of the rectangle
+        Args:
+            max_frames_before_forget (int): number of frames to iterate over without seeing DetectedObject before forgetting it
+            max_frames_length (int): maximum memory back in time through frames
+            tracking_method (str, optional): One of "centre_distance", "iou" or "both". 
+                - "centre_distance" measures distances between centre points
+                    of the detected objects. 
+                - "iou" looks at a birds eye view and measures IOU (intersection over union)
+                    between the two rectangles. Note, it moves the bounding boxes to axis-
+                    aligned by taking the top left point and the width and height of the rectangle. 
+                - "both" uses a weighted sum of the two metrics for more accurate tracking
+                Defaults to "centre_distance".
+            dist_threshold (float, optional): threshold before unassigning the tracking between frames for euclidean distance. 
+                Defaults to 5.
+            iou_threshold (float, optional): threshold before unassigning the tracking between frames for IOU. 
+                Defaults to 0.8.
         """
-        
+        # tracking method setup
         self.tracking_method = tracking_method
         if tracking_method == "centre_distance":
             self.threshold = dist_threshold
@@ -173,24 +156,25 @@ class Tracker():
             self.iou_dist_factor = 5.0 # if choose both
             self.threshold = self.iou_dist_factor * iou_threshold + dist_threshold
   
-
+        # frame setup
         self.max_frames_before_forget = max_frames_before_forget
         self.max_frames_length = max_frames_length
         self.frames = deque(maxlen=max_frames_length)
 
+        # list of tracked objects
         self.tracked_objects = []
         self.tracked_id_count = 0
 
         self.updated_centres = []
 
-        self.max_sync_length = 10
+        # setup internal IMU data
+        self.max_sync_length = 10 # maximum length of deque that compares IMU to LiDAR data for syncing
         self.twists_stamped = deque(maxlen=self.max_sync_length)
 
         logging.basicConfig(level=logging.INFO)
 
     def update(self, new_detects, timestamp):
-        """
-        Callback to update the tracked DetectedObject's when receiving a new frame.
+        """Callback to update the tracked DetectedObject's when receiving a new frame.
 
         Works by:
         1. Calculating cost matrix for some metric between DetectedObject's previous 2 frames
@@ -200,19 +184,15 @@ class Tracker():
         4. If undetected object for greater than some threshold, delete from tracked objects
         5. Add new detected objects that don't have assignments
 
-        Parameters
-        ----------
-        new_frame : DetectedObjectArray
-            Frame representing the most recent DetectedObjectArray 
-        timestamp : Time (ROS builtin_interfaces.msg)
-            Velodyne timestamp to help with synchronisation between velodyne and oxts data
-        Returns
-        -------
-        DetectedObjectArray
+        Args:
+            new_detects (DetectedObjectArray): frame representing the most recent DetectedObjectArray from clustering
+            timestamp (builtin_interfaces.msg.Time): velodyne timestamp to help with synchronisation between velodyne and oxts data
 
+        Returns:
+            DetectedObjectArray: tracked detected objects
         """
-        
-        # 1. Create cost matrix
+        ## assign previous frame to prev_detects
+        # if fails this is the first frame being tracked
         try:
             prev_detects = [obj.detected_object for obj in self.frames[-1]]
         except IndexError: # if only frames empty
@@ -227,6 +207,7 @@ class Tracker():
             tracked_object_array = self.create_detected_object_array()
             return tracked_object_array
 
+        ## 1. Create cost matrix between old and new detected objects
         metrics = np.zeros(shape=(len(prev_detects), len(new_detects.detected_objects)))
         for i, old_detected_object in enumerate(prev_detects):
             old_pos = old_detected_object.pose.position
@@ -235,15 +216,19 @@ class Tracker():
             for j, new_detected_object in enumerate(new_detects.detected_objects):
                 new_pos = new_detected_object.pose.position
                 new_dim = new_detected_object.dimensions
+                # calculate euclidean distance and assign to metrics
                 if self.tracking_method in ["centre_distance", "both"]:
                     metrics[i][j] = np.sqrt(
                         (old_pos.x - new_pos.x)**2 + (old_pos.y - new_pos.y)**2 + 
                         (old_pos.z - new_pos.z)**2
                     )
+                # calculate birds eye view boxes and append to new_bbs
                 if self.tracking_method in ["iou", "both"]:
                     top_l_x = new_pos.x - 0.5 * new_dim.x
                     top_l_y = new_pos.y - 0.5 * new_dim.y
-                    new_bbs.append([top_l_x, top_l_y, new_dim.x, new_dim.y])                    
+                    new_bbs.append([top_l_x, top_l_y, new_dim.x, new_dim.y])          
+            # new_bbs is populated, calculate iou between old and new
+            # add to euclidean distance if "both" selected, else make it the metric         
             if self.tracking_method == "iou" or self.tracking_method == "both":
                 new_bbs = np.asarray(new_bbs, dtype=np.float64)
                 top_l_x = old_pos.x - 0.5 * old_dim.x
@@ -254,15 +239,18 @@ class Tracker():
                 else: # both
                     metrics[i] += self.iou_dist_factor * (1.0  - self.iou(old_bb, new_bbs))
 
-        # 2. Perform Hungarian Algorithm assignment
+        ## 2. Perform Hungarian Algorithm assignment
         row_ind, col_ind = linear_sum_assignment(cost_matrix=metrics)
+        # create a list of length of previous detected objects with which 
+        # new detect they are assigned to. Or -1 if not assigned
         col_assignment = [-1 for _ in range(len(prev_detects))]
         for row, col in zip(row_ind, col_ind):
             col_assignment[row] = col
 
         logging.debug(f"Row inds and col inds: {row_ind, col_ind}")
         logging.debug(f"Column assignment: {col_assignment} with length {len(col_assignment)}")
-        # see if any tracks are missing from the assignment
+
+        # see if any tracks are missing from the assignment i.e. assigned -1
         for i in range(len(col_assignment)):
             if col_assignment[i] != -1: # if assigned
                 # if assignment is above some distance threshold then 
@@ -319,22 +307,16 @@ class Tracker():
         return tracked_object_array
 
     def iou(self, bbox, candidates):
-        """
-        FROM: https://github.com/nwojke/deep_sort/blob/master/deep_sort/iou_matching.py
-
+        """FROM: https://github.com/nwojke/deep_sort/blob/master/deep_sort/iou_matching.py
         Computer intersection over union.
-        Parameters
-        ----------
-        bbox : ndarray
-            A bounding box in format `(top left x, top left y, width, height)`.
-        
-        candidates : ndarray
-            A matrix of candidate bounding boxes (one per row) in the same format
+
+        Args:
+            bbox (ndarray): A bounding box in format `(top left x, top left y, width, height)`.
+            candidates (ndarray): A matrix of candidate bounding boxes (one per row) in the same format
             as `bbox`.
-        Returns
-        -------
-        ndarray
-            The intersection over union in [0, 1] between the `bbox` and each
+
+        Returns:
+            ndarray: The intersection over union in [0, 1] between the `bbox` and each
             candidate. A higher score means a larger fraction of the `bbox` is
             occluded by the candidate.
         """

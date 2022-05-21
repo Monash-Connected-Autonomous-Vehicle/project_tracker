@@ -5,17 +5,14 @@ from rclpy.node import Node
 
 import logging
 import time
-from math import sqrt
 
 import numpy as np
 
 from sensor_msgs.msg import PointCloud2 as PCL2
 from geometry_msgs.msg import TwistStamped
 from visualization_msgs.msg import MarkerArray, Marker
-from transforms3d.quaternions import mat2quat
-from transforms3d.euler import mat2euler, euler2quat
 
-from project_tracker.utils import numpy_2_PCL2, PCL2_2_numpy, create_colour_list, pcl_to_ros
+from project_tracker.utils import PCL2_2_numpy, create_colour_list, pcl_to_ros
 from project_tracker.tracking import Tracker
 
 from mcav_interfaces.msg import DetectedObject, DetectedObjectArray
@@ -27,29 +24,33 @@ class PCL2Subscriber(Node):
 
     def __init__(self):
         super(PCL2Subscriber, self).__init__('pcl2_subscriber')
-        self.subscription = self.create_subscription(
+        self.pcl2_subscription = self.create_subscription(
             PCL2,
             '/velodyne_filtered',
-            self._callback,
+            self._tracker_callback,
             10
         )
 
-        self.self_twist_subscription = self.create_subscription(
+        self.twist_subscription = self.create_subscription(
             TwistStamped,
             '/oxts_twist',
             self._oxts_callback,
             10
         )
 
+        # publishers
         self._cloud_cluster_publisher = self.create_publisher(PCL2, 'clustered_pointclouds', 10)
         self._bounding_boxes_publisher = self.create_publisher(MarkerArray, 'bounding_boxes', 10)
         self._detected_objects_publisher = self.create_publisher(DetectedObjectArray, 'detected_objects', 10)
         
 
         # parameters for Euclidean Clustering
-        self.min_cluster_size = 10
-        self.max_cluster_size = 20000
-        self.cluster_tolerance = 0.6 # range from 0.5 -> 0.7 seems suitable. Test more when have more data
+        self.declare_parameter('min_cluster_size', 10)
+        self.min_cluster_size = self.get_parameter('min_cluster_size').get_parameter_value().integer_value
+        self.declare_parameter('max_cluster_size', 20000)
+        self.max_cluster_size = self.get_parameter('max_cluster_size').get_parameter_value().integer_value
+        self.declare_parameter('cluster_tolerance', 0.6) # range from 0.5 -> 0.7 seems suitable. Test more when have more data
+        self.cluster_tolerance = self.get_parameter('cluster_tolerance').get_parameter_value().double_value
 
         # create tracker for identifying and following objects over time
         # self.tracker = Tracker(max_frames_before_forget=2, max_frames_length=30, tracking_method="centre_distance", dist_threshold=5)
@@ -59,21 +60,45 @@ class PCL2Subscriber(Node):
             iou_threshold=0.85, dist_threshold = 5
         )
 
-        # colour list for publishing different clusters
+        # colour list for publishing clusters in different colours
         self.rgb_list, self.colour_list = create_colour_list()
 
+        # set logging level
         self.get_logger().set_level(logging.DEBUG)
 
     def _oxts_callback(self, msg):
-        """Subscriber callback. Receives TwistStamped message from mock publisher to use in velocity calculations."""
+        """IMU subscriber callback. 
+        Receives TwistStamped message from mock publisher to use in velocity calculations.
+
+        http://docs.ros.org/en/noetic/api/geometry_msgs/html/msg/TwistStamped.html
+
+        Args:
+            msg (geometry_msgs.msg.TwistStamped): IMU sensor data from KITTI
+        """
         self.tracker.twists_stamped.append(msg)
-        # self.tracker.linear_vels.append(np.array([msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z]))
-        # self.tracker.angular_vel.append(np.array([msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z]))
-        # self.tracker.oxts_timestamps.append(msg.header.stamp)
         self.get_logger().debug(f"TwistStamped message received! {msg}")
 
-    def _callback(self, msg):
-        """Subscriber callback. Receives PCL2 message and converts it to points"""
+    def _tracker_callback(self, msg):
+        """LiDAR subscriber callback. 
+        Reads in the PCL2 message and converts it to numpy array for easier manipulation.
+
+        Converts numpy array to pcl.PointCloud message to fit clustering using euclidean 
+        clustering. Merges clusters based on side to side distance from vehicle, this ensures
+        that things like walls are marged together rather than identified as multiple clusters.
+        
+        Colours the clusters and publishes them to `/clustered_pointclouds`. 
+
+        Fits bounding boxes to the clusters by creating a `DetectedObjectArray`. Track objects
+        by assigning IDs to the `DetectedObjectArray` using `Tracker` class. Publish the 
+        bounding boxes and `DetectedObjectArray`. Creates bounding box markers for RViz.
+
+
+        http://docs.ros.org/en/lunar/api/sensor_msgs/html/msg/PointCloud2.html
+
+        Args:
+            msg (sensor_msgs.msg.PointCloud2): pointcloud received from LiDAR
+        """
+        ## read in PCL2 message and convert to numpy array
         start = time.time()
         self.original_frame_id = msg.header.frame_id
         self.full_cloud = PCL2_2_numpy(msg, reflectance=False)
@@ -92,8 +117,8 @@ class PCL2Subscriber(Node):
         clustering_ec_time = time.time() - start
         self.get_logger().debug(f"PCL binding ec took {clustering_ec_time:.5f}s to find {len(self.clusters_ec)} clusters.")
 
+        # merge clusters based on side to side distance from vehicle
         merged_clusters = self.merge_y_clusters()
-        # merged_clusters = self.clusters_ec
 
         ## PUBLISHING
         # COLOURED VERSION
@@ -107,7 +132,6 @@ class PCL2Subscriber(Node):
                     self.cloud[indice][2],
                     self.colour_list[j]
                 ])
-                
         # convert to pcl.PointCloud_PointXYZRGB for visualisation in RViz
         cluster_colour_cloud = pcl.PointCloud_PointXYZRGB()
         cluster_colour_cloud.from_list(self.colour_cluster_point_list)
@@ -115,7 +139,7 @@ class PCL2Subscriber(Node):
         pcl2_msg = pcl_to_ros(cluster_colour_cloud, timestamp, self.original_frame_id) # convert the pcl to a ROS PCL2 message
         self._cloud_cluster_publisher.publish(pcl2_msg)
 
-        # fit bounding boxes to the clustered pointclouds
+        # create DetectedObjectArray
         start = time.time()
         detected_objects = self.create_detected_objects() 
 
@@ -123,8 +147,8 @@ class PCL2Subscriber(Node):
         tracked_detected_objects = self.tracker.update(detected_objects, timestamp=msg.header.stamp)
         self.get_logger().debug(f"Number of tracked objects: {len(tracked_detected_objects.detected_objects)}")
 
-        # fit bounding boxes and ID labels
-        self.fit_bounding_boxes(tracked_detected_objects)
+        # create bounding boxes and ID labels
+        self.create_bounding_boxes(tracked_detected_objects)
 
         tracking_time = time.time() - start
         self.get_logger().debug(f"Tracking took {tracking_time:.5f}s")
@@ -135,20 +159,17 @@ class PCL2Subscriber(Node):
 
     def euclidean_clustering_ec(self, ec_cloud, ec_tree):
         """
-        Perform euclidean clustering with a given pcl.PointCloud() and kdtree
+        Perform euclidean clustering with a given pcl.PointCloud and kdtree
 
-        Parameters
-        ----------
-        ec_cloud : pcl.PointCloud()
-            pcl version of pointcloud message received
-        ec_tree : kdtree
-            kdtree from pcl-python binding
+        Args:
+            ec_cloud (pcl.PointCloud): pcl version of pointcloud message received
+            ec_tree(pcl.kdtree): kdtree from pcl-python binding created with pcl.PointCloud.make_kdtree()
         """
         # make euclidean cluster extraction method
         ec = ec_cloud.make_EuclideanClusterExtraction()
         # set parameters
         ec.set_ClusterTolerance(self.cluster_tolerance)
-        ec.set_MinClusterSize(self.min_cluster_size + 1)
+        ec.set_MinClusterSize(self.min_cluster_size)
         ec.set_MaxClusterSize(self.max_cluster_size)
         ec.set_SearchMethod(ec_tree)
         # perform euclidean clustering and return indices
@@ -157,12 +178,17 @@ class PCL2Subscriber(Node):
 
     def merge_y_clusters(self):
         """Merge clusters if they have a large absolute y value (side to side). Large absolute y 
-        value indicates that the cluster is probably a wall. 
+        value indicates that the cluster is probably a wall. Don't want to fit multiple clusters
+        to wall.
+
+        Returns:
+            list: clusters from euclidean clustering that have been merged based on y value
         """
+        self.merged_clusters = [] # list of clusters similar to self.clusters_ec but merged
+        to_merge_ys = [] # y values of clusters that are marked to be merged
+        to_merge_clusters = [] # cluster indices of clusters that are marked to be merged
+
         # iterate through all of the current clusters and note where large absolute y values occur
-        self.merged_clusters = []
-        to_merge_ys = []
-        to_merge_clusters = []
         for indices in self.clusters_ec:
             # extract centroids
             cloud = self.cloud[list(indices)] # numpy array cloud
@@ -187,7 +213,7 @@ class PCL2Subscriber(Node):
         # check through each cluster to merge to find which have similar y values
         while len(to_merge_ys) > 1:
             # get distance between each cluster
-            y = to_merge_ys[0]
+            y = to_merge_ys[0] # y value to compare to other clusters
             distances = [comp - y for comp in to_merge_ys[1:]]
             # iterate through the distances and merge those with small distance
             merged_cluster = []
@@ -211,8 +237,10 @@ class PCL2Subscriber(Node):
 
     def create_detected_objects(self):
         """
-        Create detected objects from the clusters by finding their centre points and dimensions. This 
+        Create `DetectedObjectArray` from the clusters by finding their centre points and dimensions. This 
         creates the constraints necessary to fit a bounding box later.
+
+        TODO: replace with L-shape fitting
         
         Tutorial at PCL docs helps with make_MomentOfInertiaEstimation aspect
         https://pcl.readthedocs.io/projects/tutorials/en/master/moment_of_inertia.html#moment-of-inertia
@@ -258,7 +286,7 @@ class PCL2Subscriber(Node):
             # detected_object.pose.orientation.y = 0. #float(quat[2]/mag)
             # detected_object.pose.orientation.z = float(quat[2]/mag)#float(quat[3])
 
-            ### oriented version
+
             detected_object.pose.position.x = float(position_OBB[0,0])
             detected_object.pose.position.y = float(position_OBB[0,1])
             detected_object.pose.position.z = float(position_OBB[0,2]) 
@@ -289,6 +317,21 @@ class PCL2Subscriber(Node):
         return objects
 
     def check_real_object(self, height, width, length, x,y,z):
+        """Rule based filtering to determine whether a bounding box fitted is an object
+        we want to track or not. Checks height, width, length and ratio of length to 
+        width.
+
+        Args:
+            height (float): height of object
+            width (float): width of object
+            length (float): length of object
+            x (float): x coordinate of object
+            y (float): y coordinate of object
+            z (float): z coordinate of object
+
+        Returns:
+            bool: whether object should be tracked or not
+        """
         # parameters
         min_height = 0.8
         max_height = 3.5
@@ -317,13 +360,17 @@ class PCL2Subscriber(Node):
             return False
         return True
 
-    def fit_bounding_boxes(self, tracked_detected_objects):
-        """
-        Fit bounding boxes to tracked detected objects
+    def create_bounding_boxes(self, tracked_detected_objects):
+        """Add bounding boxes to tracked detected objects for visualisation in RViz.
+        Uses `MarkerArray` to create Rectangular Prisms.
+
+        Args:
+            tracked_detected_objects (DetectedObjectArray): objects that have been tracked from a frame
         """
         self.markers = MarkerArray() # list of markers for visualisations of boxes/IDs
 
         for d_o in tracked_detected_objects.detected_objects:
+            # create number that shows ID of the detected object
             id_marker = Marker()
             id_marker.ns = 'object_id'
             id_marker.id = d_o.object_id
@@ -351,10 +398,9 @@ class PCL2Subscriber(Node):
             bounding_box_marker.type = Marker.CUBE
             bounding_box_marker.action = Marker.ADD
             bounding_box_marker.color.a = 0.5
-            bounding_box_marker.color.r = 255.#self.rgb_list[cluster_idx][0]/255.
-            bounding_box_marker.color.g = 255.#self.rgb_list[cluster_idx][1]/255.
-            bounding_box_marker.color.b = 255.#self.rgb_list[cluster_idx][2]/255.
-            # size -> 2 times the max_point from centre
+            bounding_box_marker.color.r = 255.
+            bounding_box_marker.color.g = 255.
+            bounding_box_marker.color.b = 255.
             bounding_box_marker.scale.x = d_o.dimensions.x
             bounding_box_marker.scale.y = d_o.dimensions.y
             bounding_box_marker.scale.z = d_o.dimensions.z
