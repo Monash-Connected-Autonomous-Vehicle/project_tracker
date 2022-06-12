@@ -164,7 +164,7 @@ cd ~/mcav_ws
 . install/setup.bash
 ros2 launch project_tracker tracking_carla.launch.py
 ```
-* Terminal 3: launch rviz2 and set frame_id to 'velodyne'. Add relevant pointcloud/image topics
+* Terminal 3: launch rviz2 and set frame_id to 'ego_vehicle/lidar'. Add relevant pointcloud/image topics
 
 
 ## ROS Parameters and Topics

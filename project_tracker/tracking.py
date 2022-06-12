@@ -264,12 +264,13 @@ class Tracker():
                     new_detects.detected_objects[col_assignment[i]].object_id = self.tracked_objects[i].object_id
                     self.tracked_objects[i].detected_object = new_detects.detected_objects[col_assignment[i]]
 
+                    # COMMENTED OUT AS NO LONGER UPDATING YAW BASED ON VELOCITY
                     # update the velocity and yaw based off that velocity
-                    vel, yaw = self.tracked_objects[i].update_velocity(
-                        new_position=self.tracked_objects[i].detected_object.pose.position,
-                        velodyne_timestamp=timestamp,
-                        twists_stamped=self.twists_stamped
-                    )
+                    # vel, yaw = self.tracked_objects[i].update_velocity(
+                    #     new_position=self.tracked_objects[i].detected_object.pose.position,
+                    #     velodyne_timestamp=timestamp,
+                    #     twists_stamped=self.twists_stamped
+                    # )
             else: # if not assigned, add a frame skipped
                 self.tracked_objects[i].skipped_frames += 1
         

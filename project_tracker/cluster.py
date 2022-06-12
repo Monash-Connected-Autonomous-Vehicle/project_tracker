@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 import rclpy
 from rclpy.node import Node
 
@@ -14,9 +13,11 @@ from visualization_msgs.msg import MarkerArray, Marker
 
 from project_tracker.utils import PCL2_2_numpy, create_colour_list, pcl_to_ros
 from project_tracker.tracking import Tracker
+from project_tracker.bb_fitting import LShapeFitter
 
 from mcav_interfaces.msg import DetectedObject, DetectedObjectArray
 
+from transforms3d.euler import euler2quat
 import pcl
 
 
@@ -51,6 +52,9 @@ class PCL2Subscriber(Node):
         self.max_cluster_size = self.get_parameter('max_cluster_size').get_parameter_value().integer_value
         self.declare_parameter('cluster_tolerance', 0.6) # range from 0.5 -> 0.7 seems suitable. Test more when have more data
         self.cluster_tolerance = self.get_parameter('cluster_tolerance').get_parameter_value().double_value
+
+        # parameters for merging clusters based on side to side distance from car
+        self.merge_y_thresh = 8. # [m] either side of car
 
         # create tracker for identifying and following objects over time
         # self.tracker = Tracker(max_frames_before_forget=2, max_frames_length=30, tracking_method="centre_distance", dist_threshold=5)
@@ -137,23 +141,26 @@ class PCL2Subscriber(Node):
         cluster_colour_cloud.from_list(self.colour_cluster_point_list)
         timestamp = self.get_clock().now().to_msg()
         pcl2_msg = pcl_to_ros(cluster_colour_cloud, timestamp, self.original_frame_id) # convert the pcl to a ROS PCL2 message
-        self._cloud_cluster_publisher.publish(pcl2_msg)
-
-        # create DetectedObjectArray
+        
+        # create DetectedObjectArray with bounding boxes
         start = time.time()
         detected_objects = self.create_detected_objects() 
+        tracking_time = time.time() - start
+        self.get_logger().debug(f"BBs took {tracking_time:.5f}s")
 
         # track objects over time
+        start = time.time()
         tracked_detected_objects = self.tracker.update(detected_objects, timestamp=msg.header.stamp)
         self.get_logger().debug(f"Number of tracked objects: {len(tracked_detected_objects.detected_objects)}")
 
-        # create bounding boxes and ID labels
-        self.create_bounding_boxes(tracked_detected_objects)
+        # create bounding boxes and ID labels for ROS visualisation
+        self.create_ros_markers(tracked_detected_objects)
 
         tracking_time = time.time() - start
         self.get_logger().debug(f"Tracking took {tracking_time:.5f}s")
 
-        # publish bounding boxes and detected objects
+        # publish cluster, bounding boxes and detected objects
+        self._cloud_cluster_publisher.publish(pcl2_msg)
         self._bounding_boxes_publisher.publish(self.markers)
         self._detected_objects_publisher.publish(tracked_detected_objects)
 
@@ -190,7 +197,6 @@ class PCL2Subscriber(Node):
 
         # iterate through all of the current clusters and note where large absolute y values occur
         for indices in self.clusters_ec:
-            # extract centroids
             cloud = self.cloud[list(indices)] # numpy array cloud
             # convert to pcl object
             bb_cloud = pcl.PointCloud()
@@ -203,7 +209,7 @@ class PCL2Subscriber(Node):
             y = float(position_OBB[0,1])
 
             # append to list that will then be checked for merging
-            if abs(y) > 7.:
+            if abs(y) > self.merge_y_thresh:
                 to_merge_ys.append(y)
                 to_merge_clusters.append(indices)
             # otherwise append to already 'merged' clusters
@@ -214,13 +220,13 @@ class PCL2Subscriber(Node):
         while len(to_merge_ys) > 1:
             # get distance between each cluster
             y = to_merge_ys[0] # y value to compare to other clusters
-            distances = [comp - y for comp in to_merge_ys[1:]]
+            distances = [other_y - y for other_y in to_merge_ys[1:]]
             # iterate through the distances and merge those with small distance
-            merged_cluster = []
+            merged_cluster = to_merge_clusters[0]
             leftover_indices = []
             for i, dist in enumerate(distances):
                 if abs(dist) < 2.0:
-                    merged_cluster.extend(to_merge_clusters[i])
+                    merged_cluster.extend(to_merge_clusters[i+1])
                 else:
                     leftover_indices.append(i+1)
             # append merged cluster and remove those that have already been merged
@@ -231,90 +237,120 @@ class PCL2Subscriber(Node):
         for leftover_cluster in to_merge_clusters:
             self.merged_clusters.append(leftover_cluster)
         
-        self.get_logger().info(f"Merged {len(self.clusters_ec)-len(self.merged_clusters)} clusters.")
+        self.get_logger().info(f"Merged {len(self.clusters_ec)} clusters into {len(self.merged_clusters)}.")
         return self.merged_clusters
 
 
     def create_detected_objects(self):
         """
-        Create `DetectedObjectArray` from the clusters by finding their centre points and dimensions. This 
-        creates the constraints necessary to fit a bounding box later.
-
-        TODO: replace with L-shape fitting
+        Create `DetectedObjectArray` by fitting bounding boxes to clusters.
         
         Tutorial at PCL docs helps with make_MomentOfInertiaEstimation aspect
         https://pcl.readthedocs.io/projects/tutorials/en/master/moment_of_inertia.html#moment-of-inertia
         """
         objects = DetectedObjectArray()
 
+        self.L_shape_fitter = LShapeFitter()
         for cluster_idx, indices in enumerate(self.merged_clusters):
             cloud = self.cloud[list(indices)] # numpy array cloud
-            # convert to pcl object
-            bb_cloud = pcl.PointCloud()
-            bb_cloud.from_array(cloud) 
-
-            # create feature extractor for bounding box
-            feature_extractor = bb_cloud.make_MomentOfInertiaEstimation()
-            feature_extractor.compute()
-            # oriented bounding box
-            [min_point_OBB, max_point_OBB, position_OBB,
-                rotational_matrix_OBB] = feature_extractor.get_OBB()
 
             # create detected object
             detected_object = DetectedObject()
             detected_object.object_id = cluster_idx # dummy value until we track the objects
             detected_object.frame_id = self.original_frame_id
 
+            # perform L-shaped fitting on cluster
+            self.get_logger().debug(f"Cluster {cluster_idx}")
+            centre, width, length, yaw = self.L_shape_fitter.fit_rectangle(cloud)
+            min_z = min(float(point[2]) for point in cloud)
+            max_z = max(float(point[2]) for point in cloud)
+            height = max_z - min_z
 
-            ### COMMENTED OUT AS WE ARE NOT ESTIMATING YAW HERE ANYMORE
-            ### WE ARE GOING TO ESTIMATE YAW BASED ON VELOCITY VECTORS
-
-            # # convert rotational matrix to quaternion for use in pose
-            # roll, pitch, yaw = mat2euler(rotational_matrix_OBB)
-            # while not(-10. < yaw*180/np.pi < 10.):
-            #     yaw -= np.sign(yaw) * 0.15
-            # quat = euler2quat(0., 0., yaw)
-            # # pose -> assume of center point
-            # detected_object.pose.orientation.w = quat[0]
-            # detected_object.pose.orientation.x = quat[1]
-            # detected_object.pose.orientation.y = quat[2]
-            # detected_object.pose.orientation.z = quat[3]
-            # # orientation -> restricted to rotate only around the z axis i.e. flat to ground plane
-            # mag = sqrt(quat[0]**2 + quat[3]**2)
-            # detected_object.pose.orientation.w = float(quat[0]/mag)
-            # detected_object.pose.orientation.x = 0. #float(quat[1])
-            # detected_object.pose.orientation.y = 0. #float(quat[2]/mag)
-            # detected_object.pose.orientation.z = float(quat[2]/mag)#float(quat[3])
-
-
-            detected_object.pose.position.x = float(position_OBB[0,0])
-            detected_object.pose.position.y = float(position_OBB[0,1])
-            detected_object.pose.position.z = float(position_OBB[0,2]) 
+            detected_object.pose.position.x = centre[0]
+            detected_object.pose.position.y = centre[1]
+            detected_object.pose.position.z = -(max_z - min_z) / 2 # coordinate frame defined negative
             # dimensions -> assuming want distance from face to face
-            detected_object.dimensions.x = 2 * float(max_point_OBB[0,0])
-            detected_object.dimensions.y = 2 * float(max_point_OBB[0,1])
-            detected_object.dimensions.z = 2 * float(max_point_OBB[0,2])
+            detected_object.dimensions.x = length
+            detected_object.dimensions.y = width
+            detected_object.dimensions.z = height
             # object and signal class -> unknown for now
             detected_object.object_class = detected_object.CLASS_UNKNOWN
             detected_object.signal_state = detected_object.SIGNAL_UNKNOWN
 
+            quat = euler2quat(0., 0., yaw)
+            # pose -> assume of center point
+            detected_object.pose.orientation.w = quat[0]
+            detected_object.pose.orientation.x = quat[1]
+            detected_object.pose.orientation.y = quat[2]
+            detected_object.pose.orientation.z = quat[3]
+
 
             # perform rule based filtering for types of objects we want to track
-            object_height = 2 * float(max_point_OBB[0,2])
-            object_width = 2 * float(max_point_OBB[0,1])
-            object_length = 2 * float(max_point_OBB[0,0])
-            
-            x = float(position_OBB[0,0])
-            y = float(position_OBB[0,1])
-            z = float(position_OBB[0,2]) 
-            real_object = self.check_real_object(object_height, object_width, object_length,
-            x, y, z)   
+            x = centre[0]
+            y = centre[1]
+            z = (max_z - min_z) / 2
+            real_object = self.check_real_object(height, width, length, x, y, z)   
 
+            # TODO change to commented section below once not debugging
+            # assign objects that are real a signal state to then change bounding box colour for visualisation in RViz
             if real_object:
-                objects.detected_objects.append(detected_object)
+                detected_object.signal_state = detected_object.SIGNAL_GREEN
+            objects.detected_objects.append(detected_object)
 
+            # TODO this is the commented section
+            # if real_object:
+            #     objects.detected_objects.append(detected_object)
 
         return objects
+
+
+    def get_L_shape_bb(self, cloud):
+        """Finds L shaped bounding box based on algorithm in paper referenced below
+        and code implemented in C++ found in Autoware AI.
+
+        3D-LIDAR Multi Object Tracking for Autonomous Driving - A.S. Abdul Rachman
+        https://github.com/Autoware-AI/core_perception/blob/master/lidar_naive_l_shape_detect/nodes/lidar_naive_l_shape_detect/lidar_naive_l_shape_detect.cpp
+
+        Args:
+            cloud (np.ndarray): numpy array representing the points in a cluster that a bounding box 
+                should be fitted to
+        """
+        # thresholds for L shaped fitting
+        _no_random_points = 80
+        _slope_dist_thresh = 2
+        _num_points_thresh = 10
+
+
+        # initialise minimum and maximum points 
+        # works by knowing that if all points are in positive quadrant
+        # then y/x will produce largest number for point at large y and small x
+        # and will produce smallest number for point at small y and large x
+        min_point = [0,0] # x1 in paper
+        max_point = [0,0] # x2 in paper
+        min_slope = 1000 # preset to some large number
+        max_slope = -1000 # preset to some small number
+        for point in cloud:
+            # store values from current point for calculation
+            x_point = point[0]
+            y_point = point[1]
+
+            # calculate slope ?? line 233 autoware AI
+            delta_m = y_point / x_point
+            if delta_m < min_slope:
+                min_slope = delta_m
+                min_point = [x_point, y_point]
+            if delta_m > max_slope:
+                max_slope = delta_m
+                max_point = [x_point, y_point]
+
+            # L-shape fitting parameters
+            dist_vec = [max_point[0]-min_point[0], max_point[1] - min_point[1]]
+            slope_dist = np.sqrt(dist_vec[0]**2 + dist_vec[1]**2)
+            slope = dist_vec[1] / dist_vec[0]
+
+            if slope_dist > _slope_dist_thresh and len(cloud) > _num_points_thresh:
+                max_dist = 0
+                orthogonal_point = [0,0]
 
     def check_real_object(self, height, width, length, x,y,z):
         """Rule based filtering to determine whether a bounding box fitted is an object
@@ -360,15 +396,15 @@ class PCL2Subscriber(Node):
             return False
         return True
 
-    def create_bounding_boxes(self, tracked_detected_objects):
-        """Add bounding boxes to tracked detected objects for visualisation in RViz.
+    def create_ros_markers(self, tracked_detected_objects):
+        """Add bounding box markers to tracked detected objects for visualisation in RViz.
         Uses `MarkerArray` to create Rectangular Prisms.
 
         Args:
             tracked_detected_objects (DetectedObjectArray): objects that have been tracked from a frame
         """
         self.markers = MarkerArray() # list of markers for visualisations of boxes/IDs
-
+        
         for d_o in tracked_detected_objects.detected_objects:
             # create number that shows ID of the detected object
             id_marker = Marker()
@@ -398,7 +434,11 @@ class PCL2Subscriber(Node):
             bounding_box_marker.type = Marker.CUBE
             bounding_box_marker.action = Marker.ADD
             bounding_box_marker.color.a = 0.5
-            bounding_box_marker.color.r = 255.
+            if d_o.signal_state == d_o.SIGNAL_GREEN:
+                bounding_box_marker.color.r = 0.
+            else:
+                self.get_logger().debug(f"Discarded at pos: ({d_o.pose.position.x}, {d_o.pose.position.y})")
+                bounding_box_marker.color.r = 255.
             bounding_box_marker.color.g = 255.
             bounding_box_marker.color.b = 255.
             bounding_box_marker.scale.x = d_o.dimensions.x
