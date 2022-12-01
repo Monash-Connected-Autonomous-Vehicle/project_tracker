@@ -84,7 +84,7 @@ ros2 launch project_tracker tracking.launch.xml launch_velodyne:=true
 
 Terminal 2 (Visualise result in rviz):
 ```
-rviz2 -d config/tracker.rviz
+rviz2 -d project_tracker/rviz/tracker.rviz
 ```
 
 ### Option 2: Run on data from the KITTI dataset
