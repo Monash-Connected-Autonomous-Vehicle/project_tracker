@@ -17,43 +17,17 @@ endif()
 
 add_executable(filter src/filter.cpp)
 
-target_include_directories(filter PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>)
+target_include_directories(filter PUBLIC ${PCL_INCLUDE_DIRS})
 
 # find dependencies
 
 find_package(ament_cmake_python REQUIRED)
 find_package(rclpy REQUIRED)
-find_package(cv_bridge REQUIRED)
-# find_package(cv2 REQUIRED)
-
-# set(CMAKE_PREFIX_PATH /usr/share/doc/libtorch3c2)
-# find_package(Torch REQUIRED)
-
-set(TORCH_BASE_PATH "$ENV{VCPKG_ROOT}/installed/${VCPKG_TARGET_TRIPLET}")
-message(STATUS TORCH_BASE_PATH=${TORCH_BASE_PATH})
-
-set(Torch_INCLUDE_DIR "${TORCH_BASE_PATH}/include")
-set(Torch_LIBRARIES "${TORCH_BASE_PATH}/lib")
-# target_link_libraries is to be preferred
-#link_directories(${Torch_LIBRARIES})
-find_library(LIBRARY_TORCH TH HINTS ${Torch_LIBRARIES})
-
-# set(cv2_DIR /usr/lib/x86_64-linux-gnu/cmake/opencv4)
-find_package(OpenCV REQUIRED)
-# set(CV2_BASE_PATH "$ENV{VCPKG_ROOT}/installed/${VCPKG_TARGET_TRIPLET}")
-# message(STATUS CV2_BASE_PATH=${CV2_BASE_PATH})
-
-# set(CV2_INCLUDE_DIR "${CV2_BASE_PATH}/include")
-# set(CV2_LIBRARIES "${CV2_BASE_PATH}/lib")
-# find_library(LIBRARY_CV2 TH HINTS ${CV2_LIBRARIES})
-
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package (PCL 1.8 REQUIRED)
+find_package (PCL 1.12 REQUIRED)
 find_package(pcl_conversions REQUIRED)
 
 
@@ -62,9 +36,9 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}
 )
 
-ament_target_dependencies(filter rclcpp sensor_msgs)
+ament_target_dependencies(filter rclcpp sensor_msgs pcl_conversions)
 
-set(PCL_INCLUDE_DIRS /usr/local/include/pcl-1.8)
+set(PCL_INCLUDE_DIRS /usr/include/pcl-1.12)
 include_directories(${PCL_INCLUDE_DIRS})
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
